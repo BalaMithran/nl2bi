@@ -4,7 +4,7 @@ NL2BI - Natural Language to Business Intelligence
 Convert natural language queries to SQL, charts, and business insights.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 __author__ = "Mithran Bala"
 
 from nl2bi.core import SchemaExtractor

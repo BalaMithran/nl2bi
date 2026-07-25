@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="nl2bi",
-    version="0.1.1",
+    version="0.2.0",
     description="Natural Language to Business Intelligence - Convert natural language queries to SQL, charts, and business insights",
     author="Mithran Bala",
     author_email="mithranbala123@gmail.com",

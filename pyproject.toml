@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nl2bi"
-version = "0.1.1"
+version = "0.2.0"
 description = "Natural Language to Business Intelligence - Convert natural language queries to SQL, charts, and business insights"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -45,10 +45,9 @@ llm = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/nl2bi"
-Documentation = "https://nl2bi.readthedocs.io"
-Repository = "https://github.com/yourusername/nl2bi.git"
-Issues = "https://github.com/yourusername/nl2bi/issues"
+Homepage = "https://github.com/BalaMithran/nl2bi"
+Repository = "https://github.com/BalaMithran/nl2bi.git"
+Issues = "https://github.com/BalaMithran/nl2bi/issues"
 
 [tool.black]
 line-length = 100
