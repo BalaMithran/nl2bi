@@ -49,7 +49,7 @@ class SQLGenerator:
         Returns:
             Tuple of (sql_query, explanation)
         """
-        schema_info = self.schema_extractor.get_schema_string()
+        schema_info = self.schema_extractor.get_relevant_schema_string(query)
 
         system_prompt = """You are an expert SQL developer. Convert natural language queries to SQL.
 

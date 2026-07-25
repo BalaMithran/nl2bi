@@ -42,6 +42,33 @@ class TestSchemaExtractor:
         assert table.name == "users"
         assert len(table.columns) == 2
 
+    def _extractor_with_tables(self, table_names):
+        """Build a SchemaExtractor with a fake .schema dict, skipping DB access entirely."""
+        extractor = SchemaExtractor.__new__(SchemaExtractor)
+        extractor.schema = {
+            name: TableInfo(name, [ColumnInfo("id", "INTEGER", False, True)])
+            for name in table_names
+        }
+        extractor._extracted = True
+        return extractor
+
+    def test_get_relevant_schema_string_ranks_matching_tables_first(self):
+        extractor = self._extractor_with_tables(["customers", "orders", "audit_logs"])
+
+        result = extractor.get_relevant_schema_string("show me customers and orders", top_k=2)
+
+        assert "Table: customers" in result
+        assert "Table: orders" in result
+        assert "Table: audit_logs" not in result
+
+    def test_get_relevant_schema_string_returns_everything_under_top_k(self):
+        extractor = self._extractor_with_tables(["customers", "orders"])
+
+        result = extractor.get_relevant_schema_string("anything", top_k=15)
+
+        assert "Table: customers" in result
+        assert "Table: orders" in result
+
 
 class TestSQLGenerator:
     """Test SQL generation functionality."""
@@ -67,7 +94,7 @@ class TestSQLGenerator:
         )
 
         generator = SQLGenerator(Mock(), api_key="test")
-        generator.schema_extractor.get_schema_string.return_value = "Table: users"
+        generator.schema_extractor.get_relevant_schema_string.return_value = "Table: users"
 
         sql, explanation = generator.generate_sql("show me users")
         assert sql == "SELECT * FROM users"
@@ -85,7 +112,7 @@ class TestSQLGenerator:
         )
 
         generator = SQLGenerator(Mock(), api_key="test")
-        generator.schema_extractor.get_schema_string.return_value = "Table: users"
+        generator.schema_extractor.get_relevant_schema_string.return_value = "Table: users"
 
         generator.generate_sql(
             "show me users",
