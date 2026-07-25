@@ -83,20 +83,29 @@ class NL2BIOrchestrator:
             "error": None,
         }
 
-        # Classify intent once; non-fatal if it fails, SQL generation just
-        # loses the per-type prompt hint
+        # Stage 1 (Schema Extractor) already ran in __init__ (full DB
+        # introspection); self.sql_generator retrieves just the relevant
+        # slice of it per call below (see SchemaExtractor.get_relevant_schema_string).
+
+        # Stage 2: Intent Classifier - non-fatal if it fails, SQL generation
+        # just loses the per-type prompt hint
         try:
             question_type = self.intent_classifier.classify(natural_language_query)
             result["question_type"] = question_type.value
         except Exception:
             question_type = None
 
-        # Generate SQL, retrying with execution feedback if it fails to run
+        # Stages 3-6: SQL Planner -> Validator -> Executor, wrapped in
+        # Self-Correction - each rejection/execution failure feeds its
+        # reason back into the next SQL Planner attempt, bounded by
+        # max_sql_retries
         sql, explanation = None, None
         previous_sql, previous_error = None, None
 
         for attempt in range(self.max_sql_retries + 1):
             result["retry_count"] = attempt
+
+            # Stage 3: SQL Planner
             try:
                 sql, explanation = self.sql_generator.generate_sql(
                     natural_language_query,
@@ -109,6 +118,7 @@ class NL2BIOrchestrator:
                 result["error"] = f"SQL generation failed: {str(e)}"
                 return result
 
+            # Stage 4: Validator (read-only enforcement)
             is_readonly, reason = validate_readonly(sql)
             if not is_readonly:
                 result["validation_passed"] = False
@@ -125,6 +135,7 @@ class NL2BIOrchestrator:
             if not execute:
                 break
 
+            # Stage 5: Executor
             try:
                 df = pd.read_sql(sql, self.engine)
                 result["execution_success"] = True
@@ -145,7 +156,7 @@ class NL2BIOrchestrator:
             result["data"] = df.to_dict(orient="records")
             result["columns"] = df.columns.tolist()
 
-        # Recommend charts if we have data
+        # Stage 7: Chart Reasoner
         if recommend_charts and result["data"] and result["columns"]:
             try:
                 recommendations = self.chart_finder.recommend_charts(

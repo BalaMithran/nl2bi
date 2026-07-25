@@ -601,13 +601,62 @@ class TestQueryMetrics:
 
 # Integration tests would go here
 class TestIntegration:
-    """Integration tests (requires test database)."""
-    
-    @pytest.mark.skip(reason="Requires test database setup")
-    def test_end_to_end_workflow(self):
-        """Test complete NL2BI workflow."""
-        # This would require setting up a test database
-        pass
+    """Integration test exercising the full 7-stage pipeline against a real DB."""
+
+    def test_end_to_end_workflow(self, tmp_path):
+        """NL2BI(...).query() through schema extraction, intent classification,
+        SQL generation, read-only validation, real sqlite execution, and chart
+        recommendation. Only the LLM calls are mocked - the database is real."""
+        from sqlalchemy import create_engine, text
+        from nl2bi.api import NL2BI
+
+        db_path = tmp_path / "test.db"
+        setup_engine = create_engine(f"sqlite:///{db_path}")
+        with setup_engine.connect() as conn:
+            conn.execute(text(
+                "CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT, revenue INTEGER)"
+            ))
+            conn.execute(text(
+                "INSERT INTO customers (id, name, revenue) VALUES (1, 'Acme', 500), (2, 'Globex', 900)"
+            ))
+            conn.commit()
+        setup_engine.dispose()
+
+        with patch('nl2bi.core.llm_client.OpenAI') as mock_openai_cls:
+            mock_client = mock_openai_cls.return_value
+            mock_client.chat.completions.create.side_effect = [
+                # Stage 2: Intent Classifier
+                MagicMock(choices=[MagicMock(message=MagicMock(
+                    content='{"question_type": "topn"}'
+                ))]),
+                # Stage 3: SQL Planner
+                MagicMock(choices=[MagicMock(message=MagicMock(
+                    content=(
+                        '{"sql": "SELECT name, revenue FROM customers ORDER BY revenue DESC LIMIT 1", '
+                        '"explanation": "top customer by revenue"}'
+                    )
+                ))]),
+                # Stage 7: Chart Reasoner
+                MagicMock(choices=[MagicMock(message=MagicMock(
+                    content=(
+                        '{"recommendations": [{"chart_type": "bar", "title": "Top customer", '
+                        '"x_column": "name", "y_column": "revenue", "group_by": null, '
+                        '"reasoning": "single-value comparison"}]}'
+                    )
+                ))]),
+            ]
+
+            agent = NL2BI(db_url=f"sqlite:///{db_path}", api_key="test-key")
+            result = agent.query("who is the top customer by revenue")
+
+        assert result.error is None
+        assert result.sql.strip().upper().startswith("SELECT")
+        assert list(result.table["name"]) == ["Globex"]
+        assert result.chart_type == "bar"
+        assert result.metrics.question_type == "topn"
+        assert result.metrics.validation_passed is True
+        assert result.metrics.execution_success is True
+        assert result.metrics.sql_retry_count == 0
 
 
 if __name__ == "__main__":
