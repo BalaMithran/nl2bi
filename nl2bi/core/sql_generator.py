@@ -52,6 +52,7 @@ class SQLGenerator:
         previous_sql: Optional[str] = None,
         error: Optional[str] = None,
         question_type: Optional[QuestionType] = None,
+        history_context: Optional[str] = None,
     ) -> Tuple[str, str]:
         """
         Generate SQL from a natural language query.
@@ -61,6 +62,7 @@ class SQLGenerator:
             previous_sql: A prior SQL attempt that failed to execute, if any
             error: The execution error raised by `previous_sql`, if any
             question_type: Classified question type, used to nudge the prompt
+            history_context: Prior turns / similar past queries, for multi-turn conversations
 
         Returns:
             Tuple of (sql_query, explanation)
@@ -89,6 +91,9 @@ Generate SQL for this query."""
 
         if question_type is not None:
             user_prompt += f"\n\n{_QUESTION_TYPE_HINTS[question_type]}"
+
+        if history_context:
+            user_prompt += f"\n\nConversation context:\n{history_context}"
 
         if previous_sql and error:
             user_prompt += f"""

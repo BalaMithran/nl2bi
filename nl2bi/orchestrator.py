@@ -55,15 +55,17 @@ class NL2BIOrchestrator:
         natural_language_query: str,
         execute: bool = True,
         recommend_charts: bool = True,
+        history_context: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Process a natural language query end-to-end.
-        
+
         Args:
             natural_language_query: Natural language query
             execute: Whether to execute the SQL query
             recommend_charts: Whether to recommend visualizations
-        
+            history_context: Prior turns / similar past queries, for multi-turn conversations
+
         Returns:
             Dictionary with results, SQL, recommendations, and data
         """
@@ -97,6 +99,7 @@ class NL2BIOrchestrator:
                     previous_sql=previous_sql,
                     error=previous_error,
                     question_type=question_type,
+                    history_context=history_context,
                 )
             except Exception as e:
                 result["error"] = f"SQL generation failed: {str(e)}"

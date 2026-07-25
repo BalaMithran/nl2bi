@@ -2,13 +2,22 @@
 Public-facing NL2BI API - a thin facade over NL2BIOrchestrator.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NamedTuple, Optional
 from dataclasses import dataclass, field
+from collections import deque
 import pandas as pd
 
 from nl2bi.orchestrator import NL2BIOrchestrator
+from nl2bi.core.vector_store import SimpleVectorStore
 
 _SUPPORTED_PROVIDERS = ("openai", "anthropic", "local")
+_HISTORY_SIZE = 5
+
+
+class Turn(NamedTuple):
+    """One prior question/SQL pair in a conversation."""
+    query: str
+    sql: str
 
 
 @dataclass
@@ -50,6 +59,8 @@ class NL2BI:
         db_url: str,
         llm: str = "openai",
         api_key: Optional[str] = None,
+        memory: bool = False,
+        memory_path: Optional[str] = None,
         **kwargs,
     ):
         """
@@ -59,6 +70,9 @@ class NL2BI:
             db_url: SQLAlchemy connection string for the target database
             llm: LLM provider to use ("openai", "anthropic", or "local")
             api_key: API key for the chosen provider
+            memory: Whether to recall similar past queries across turns (costs
+                one extra embedding call per query - opt-in)
+            memory_path: JSON file to persist long-term memory to, if memory=True
             **kwargs: Passed through to NL2BIOrchestrator (e.g. max_sql_retries)
         """
         if llm not in _SUPPORTED_PROVIDERS:
@@ -71,6 +85,14 @@ class NL2BI:
             provider=llm,
             **kwargs,
         )
+
+        self._history: "deque[Turn]" = deque(maxlen=_HISTORY_SIZE)
+        self._memory_path = memory_path
+        self._vector_store: Optional[SimpleVectorStore] = None
+        if memory:
+            self._vector_store = SimpleVectorStore(api_key=api_key)
+            if memory_path:
+                self._vector_store.load(memory_path)
 
     def query(
         self,
@@ -89,9 +111,44 @@ class NL2BI:
         Returns:
             QueryResult with attribute access (.table, .sql, .summary, .chart_type)
         """
+        history_context = self._build_history_context(natural_language_query)
+
         result = self._orchestrator.query(
             natural_language_query,
             execute=execute,
             recommend_charts=recommend_charts,
+            history_context=history_context,
         )
-        return QueryResult.from_orchestrator_result(result)
+        query_result = QueryResult.from_orchestrator_result(result)
+
+        if query_result.sql:
+            self._remember(natural_language_query, query_result.sql)
+
+        return query_result
+
+    def _build_history_context(self, query: str) -> Optional[str]:
+        """Build a text block summarizing short-term and (if enabled) long-term memory."""
+        parts = []
+
+        if self._history:
+            parts.append("Recent turns in this conversation:")
+            for turn in self._history:
+                parts.append(f'  Q: "{turn.query}" -> SQL: {turn.sql}')
+
+        if self._vector_store is not None:
+            similar = self._vector_store.search(query, top_k=3)
+            if similar:
+                parts.append("Similar past queries:")
+                for entry in similar:
+                    parts.append(f'  Q: "{entry["text"]}" -> SQL: {entry["metadata"].get("sql")}')
+
+        return "\n".join(parts) if parts else None
+
+    def _remember(self, query: str, sql: str) -> None:
+        """Record a successful turn in short-term (and, if enabled, long-term) memory."""
+        self._history.append(Turn(query, sql))
+
+        if self._vector_store is not None:
+            self._vector_store.add(query, {"sql": sql})
+            if self._memory_path:
+                self._vector_store.save(self._memory_path)

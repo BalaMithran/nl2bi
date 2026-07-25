@@ -459,6 +459,96 @@ class TestNL2BIFacade:
         assert len(result.table) == 1
 
 
+class TestVectorStore:
+    """Test the lightweight JSON-persisted embedding store."""
+
+    @patch('nl2bi.core.vector_store.OpenAI')
+    def test_search_ranks_nearer_vector_first(self, mock_openai_cls):
+        from nl2bi.core.vector_store import SimpleVectorStore
+
+        vectors = {"close": [1.0, 0.0], "far": [0.0, 1.0], "query": [0.9, 0.1]}
+        mock_openai_cls.return_value.embeddings.create.side_effect = (
+            lambda model, input: MagicMock(data=[MagicMock(embedding=vectors[input])])
+        )
+
+        store = SimpleVectorStore(api_key="test")
+        store.add("close")
+        store.add("far")
+
+        results = store.search("query", top_k=2)
+        assert [r["text"] for r in results] == ["close", "far"]
+
+    @patch('nl2bi.core.vector_store.OpenAI')
+    def test_save_and_load_roundtrip(self, mock_openai_cls, tmp_path):
+        from nl2bi.core.vector_store import SimpleVectorStore
+
+        mock_openai_cls.return_value.embeddings.create.return_value = MagicMock(
+            data=[MagicMock(embedding=[1.0, 0.0])]
+        )
+
+        store = SimpleVectorStore(api_key="test")
+        store.add("some text", {"sql": "SELECT 1"})
+        path = str(tmp_path / "memory.json")
+        store.save(path)
+
+        reloaded = SimpleVectorStore(api_key="test")
+        reloaded.load(path)
+        assert reloaded._entries[0]["text"] == "some text"
+        assert reloaded._entries[0]["metadata"] == {"sql": "SELECT 1"}
+
+
+class TestNL2BIFacadeMemory:
+    """Test NL2BI's short-term (always-on) and long-term (opt-in) memory."""
+
+    @patch('nl2bi.api.NL2BIOrchestrator')
+    def test_short_term_history_flows_into_next_query(self, mock_orchestrator_cls):
+        from nl2bi.api import NL2BI
+
+        mock_orchestrator_cls.return_value.query.side_effect = [
+            {"query": "q1", "sql": "SELECT 1", "sql_explanation": "x", "data": None,
+             "columns": None, "chart_recommendations": [], "error": None},
+            {"query": "q2", "sql": "SELECT 2", "sql_explanation": "y", "data": None,
+             "columns": None, "chart_recommendations": [], "error": None},
+        ]
+
+        agent = NL2BI(db_url="sqlite:///test.db", api_key="test-key")
+        agent.query("first question")
+        agent.query("second question")
+
+        second_call_kwargs = mock_orchestrator_cls.return_value.query.call_args_list[1].kwargs
+        assert "SELECT 1" in second_call_kwargs["history_context"]
+        assert "first question" in second_call_kwargs["history_context"]
+
+    def test_memory_disabled_by_default(self):
+        from nl2bi.api import NL2BI
+
+        with patch('nl2bi.api.NL2BIOrchestrator'):
+            agent = NL2BI(db_url="sqlite:///test.db", api_key="test-key")
+        assert agent._vector_store is None
+
+    @patch('nl2bi.api.SimpleVectorStore')
+    @patch('nl2bi.api.NL2BIOrchestrator')
+    def test_long_term_memory_is_searched_and_updated(self, mock_orchestrator_cls, mock_store_cls):
+        from nl2bi.api import NL2BI
+
+        mock_orchestrator_cls.return_value.query.return_value = {
+            "query": "q", "sql": "SELECT 1", "sql_explanation": "x", "data": None,
+            "columns": None, "chart_recommendations": [], "error": None,
+        }
+        mock_store = mock_store_cls.return_value
+        mock_store.search.return_value = [
+            {"text": "past question", "metadata": {"sql": "SELECT past"}}
+        ]
+
+        agent = NL2BI(db_url="sqlite:///test.db", api_key="test-key", memory=True)
+        agent.query("new question")
+
+        call_kwargs = mock_orchestrator_cls.return_value.query.call_args.kwargs
+        assert "past question" in call_kwargs["history_context"]
+        assert "SELECT past" in call_kwargs["history_context"]
+        mock_store.add.assert_called_once_with("new question", {"sql": "SELECT 1"})
+
+
 # Integration tests would go here
 class TestIntegration:
     """Integration tests (requires test database)."""
