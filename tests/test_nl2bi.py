@@ -53,6 +53,9 @@ class TestSchemaExtractor:
         }
         extractor._extracted = True
         extractor.glossary = {}
+        extractor.api_key = None
+        extractor._table_embeddings = {}
+        extractor._embeddings_ready = None
         return extractor
 
     def test_get_relevant_schema_string_ranks_matching_tables_first(self):
@@ -92,6 +95,53 @@ class TestSchemaExtractor:
         assert "Table: subscriptions" in result
         assert "Table: audit_logs" not in result
         assert "Table: invoices" not in result
+
+    @patch('nl2bi.core.OpenAI')
+    def test_embedding_based_retrieval_ranks_matching_tables_first(self, mock_openai_cls):
+        """With an api_key set, retrieval should rank by embedding similarity."""
+        extractor = self._extractor_with_tables(["customers", "orders", "audit_logs"])
+        extractor.api_key = "test-key"
+
+        index_response = MagicMock(data=[
+            MagicMock(embedding=[1.0, 0.0]),   # customers
+            MagicMock(embedding=[0.0, 1.0]),   # orders
+            MagicMock(embedding=[0.0, 0.0]),   # audit_logs
+        ])
+        query_response = MagicMock(data=[MagicMock(embedding=[0.9, 0.1])])  # closest to customers
+        mock_openai_cls.return_value.embeddings.create.side_effect = [index_response, query_response]
+
+        result = extractor.get_relevant_schema_string("who are our best customers", top_k=1)
+
+        assert "Table: customers" in result
+        assert "Table: orders" not in result
+        assert "Table: audit_logs" not in result
+
+    @patch('nl2bi.core.OpenAI')
+    def test_falls_back_to_lexical_when_indexing_fails(self, mock_openai_cls):
+        """A failed embedding call to index the schema should fall back to lexical scoring."""
+        extractor = self._extractor_with_tables(["customers", "orders", "audit_logs"])
+        extractor.api_key = "test-key"
+        mock_openai_cls.return_value.embeddings.create.side_effect = Exception("network error")
+
+        result = extractor.get_relevant_schema_string("show me customers and orders", top_k=2)
+
+        assert "Table: customers" in result
+        assert "Table: orders" in result
+        assert "Table: audit_logs" not in result
+
+    @patch('nl2bi.core.OpenAI')
+    def test_falls_back_to_lexical_when_query_embedding_fails(self, mock_openai_cls):
+        """Indexing can succeed while the per-query embed call still fails - should still fall back."""
+        extractor = self._extractor_with_tables(["customers", "orders", "audit_logs"])
+        extractor.api_key = "test-key"
+
+        index_response = MagicMock(data=[MagicMock(embedding=[1.0]) for _ in range(3)])
+        mock_openai_cls.return_value.embeddings.create.side_effect = [index_response, Exception("boom")]
+
+        result = extractor.get_relevant_schema_string("show me customers and orders", top_k=2)
+
+        assert "Table: customers" in result
+        assert "Table: orders" in result
 
 
 class TestSQLGenerator:

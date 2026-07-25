@@ -8,7 +8,7 @@ import math
 import os
 from openai import OpenAI
 
-_EMBEDDING_MODEL = "text-embedding-3-small"
+EMBEDDING_MODEL = "text-embedding-3-small"
 
 
 def _cosine_similarity(a: List[float], b: List[float]) -> float:
@@ -35,7 +35,7 @@ class SimpleVectorStore:
 
     def _embed(self, text: str) -> List[float]:
         client = OpenAI(api_key=self.api_key)
-        response = client.embeddings.create(model=_EMBEDDING_MODEL, input=text)
+        response = client.embeddings.create(model=EMBEDDING_MODEL, input=text)
         return response.data[0].embedding
 
     def add(self, text: str, metadata: Optional[Dict[str, Any]] = None) -> None:

@@ -38,7 +38,7 @@ class NL2BIOrchestrator:
         self.max_sql_retries = max_sql_retries
 
         # Initialize components
-        self.schema_extractor = SchemaExtractor(connection_string)
+        self.schema_extractor = SchemaExtractor(connection_string, api_key=openai_api_key)
         self.schema_extractor.extract_schema()
 
         self.sql_generator = SQLGenerator(

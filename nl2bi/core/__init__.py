@@ -5,8 +5,10 @@ Schema extraction from databases - discovers tables, columns, relationships.
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 import re
+from openai import OpenAI
 from sqlalchemy import inspect, create_engine
 from sqlalchemy.engine import Engine
+from nl2bi.core.vector_store import EMBEDDING_MODEL, _cosine_similarity
 
 
 @dataclass
@@ -32,17 +34,23 @@ class TableInfo:
 class SchemaExtractor:
     """Extract and manage database schema information."""
     
-    def __init__(self, connection_string: str):
+    def __init__(self, connection_string: str, api_key: Optional[str] = None):
         """
         Initialize with database connection string.
-        
+
         Args:
             connection_string: SQLAlchemy connection string
+            api_key: OpenAI API key, used for embedding-based schema retrieval.
+                Without one, get_relevant_schema_string() falls back to lexical
+                keyword overlap.
         """
         self.engine: Engine = create_engine(connection_string)
         self.schema: Dict[str, TableInfo] = {}
         self._extracted = False
         self.glossary: Dict[str, Tuple[str, Optional[str]]] = {}
+        self.api_key = api_key
+        self._table_embeddings: Dict[str, List[float]] = {}
+        self._embeddings_ready: Optional[bool] = None
     
     def extract_schema(self) -> Dict[str, TableInfo]:
         """
@@ -144,9 +152,10 @@ class SchemaExtractor:
         """
         Get schema text for only the tables most relevant to a query.
 
-        Scores tables by lexical token overlap between the query and each
-        table's name/columns, to avoid dumping the full schema into every
-        prompt on large databases.
+        Ranks tables by embedding similarity when an api_key is configured,
+        falling back to lexical token overlap if no key is set or the
+        embedding call fails for any reason - this keeps the method usable
+        offline/without a key, same fail-open pattern as IntentClassifier.
 
         Args:
             query: Natural language query to score tables against
@@ -161,19 +170,80 @@ class SchemaExtractor:
         if len(self.schema) <= top_k:
             return self.get_schema_string()
 
-        # ponytail: lexical keyword overlap, not embeddings. Upgrade to the
-        # vector store (nl2bi.core.vector_store, Phase 7) if schemas have low
-        # lexical overlap with how users phrase questions (e.g. "churn" never
-        # appearing in a column named cancelled_at).
         query_tokens = set(re.findall(r"\w+", query.lower()))
+        boosted_tables = self._glossary_boosted_tables(query_tokens)
 
-        # Business terms let a query match a table even with zero literal
-        # column-name overlap (e.g. "churn" -> subscriptions.cancelled_at).
-        boosted_tables = set()
+        if self._ensure_table_embeddings():
+            top_tables = self._rank_by_embedding(query, boosted_tables, top_k)
+        else:
+            top_tables = self._rank_by_lexical_overlap(query_tokens, boosted_tables, top_k)
+
+        return "\n".join(self._table_to_string(t) for t in top_tables) + self._glossary_string()
+
+    def _glossary_boosted_tables(self, query_tokens: set) -> set:
+        """Table names whose business-term glossary entry matches the query.
+
+        Business terms let a query match a table even with zero literal
+        column-name/embedding overlap (e.g. "churn" -> subscriptions.cancelled_at).
+        """
+        boosted = set()
         for term, (maps_to, _description) in self.glossary.items():
             if set(re.findall(r"\w+", term.lower())) & query_tokens:
-                boosted_tables.add(maps_to.split(".")[0])
+                boosted.add(maps_to.split(".")[0])
+        return boosted
 
+    def _ensure_table_embeddings(self) -> bool:
+        """Lazily embed every table's schema text, once per instance.
+
+        Returns False (cached for the instance's lifetime, no retries) if no
+        api_key is set or the embedding call fails - callers should fall
+        back to lexical scoring in that case.
+        """
+        if self._embeddings_ready is not None:
+            return self._embeddings_ready
+        if not self.api_key:
+            self._embeddings_ready = False
+            return False
+        try:
+            client = OpenAI(api_key=self.api_key)
+            table_names = list(self.schema.keys())
+            texts = [self._table_to_string(self.schema[name]) for name in table_names]
+            response = client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
+            self._table_embeddings = {
+                name: item.embedding for name, item in zip(table_names, response.data)
+            }
+            self._embeddings_ready = True
+        except Exception:
+            self._embeddings_ready = False
+        return self._embeddings_ready
+
+    def _rank_by_embedding(
+        self, query: str, boosted_tables: set, top_k: int
+    ) -> List[TableInfo]:
+        try:
+            client = OpenAI(api_key=self.api_key)
+            response = client.embeddings.create(model=EMBEDDING_MODEL, input=query)
+            query_embedding = response.data[0].embedding
+        except Exception:
+            query_tokens = set(re.findall(r"\w+", query.lower()))
+            return self._rank_by_lexical_overlap(query_tokens, boosted_tables, top_k)
+
+        scored = []
+        for table_info in self.schema.values():
+            score = _cosine_similarity(query_embedding, self._table_embeddings[table_info.name])
+            if table_info.name in boosted_tables:
+                score += 1.0  # a glossary match always outranks pure similarity noise
+            scored.append((score, table_info))
+
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [table for _, table in scored[:top_k]]
+
+    def _rank_by_lexical_overlap(
+        self, query_tokens: set, boosted_tables: set, top_k: int
+    ) -> List[TableInfo]:
+        # ponytail: lexical keyword overlap. Only reached without an api_key
+        # or when the embedding call fails - the primary path above is
+        # embedding similarity.
         scored = []
         for table_info in self.schema.values():
             table_tokens = set(re.findall(r"\w+", table_info.name.lower()))
@@ -185,8 +255,7 @@ class SchemaExtractor:
             scored.append((score, table_info))
 
         scored.sort(key=lambda pair: pair[0], reverse=True)
-        top_tables = [table for _, table in scored[:top_k]]
-        return "\n".join(self._table_to_string(t) for t in top_tables) + self._glossary_string()
+        return [table for _, table in scored[:top_k]]
     
     def add_business_term(
         self, term: str, maps_to: str, description: Optional[str] = None
