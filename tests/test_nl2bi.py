@@ -8,6 +8,7 @@ from nl2bi.core import SchemaExtractor, ColumnInfo, TableInfo
 from nl2bi.core.sql_generator import SQLGenerator
 from nl2bi.core.chart_finder import ChartFinder, ChartType
 from nl2bi.core.validator import validate_readonly
+from nl2bi.core.intent_classifier import IntentClassifier, QuestionType
 
 
 class TestSchemaExtractor:
@@ -147,6 +148,44 @@ class TestSQLGenerator:
         assert "SELECT * FROM userz" in sent_prompt
         assert "does not exist" in sent_prompt
 
+    @patch('nl2bi.core.llm_client.OpenAI')
+    def test_generate_sql_includes_question_type_hint(self, mock_openai_cls):
+        """Passing a question_type should nudge the prompt with a type-specific hint."""
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(
+                content='{"sql": "SELECT * FROM sales ORDER BY revenue DESC LIMIT 5", "explanation": "top 5"}'
+            ))]
+        )
+
+        generator = SQLGenerator(Mock(), api_key="test")
+        generator.schema_extractor.get_relevant_schema_string.return_value = "Table: sales"
+
+        generator.generate_sql("top 5 products", question_type=QuestionType.TOPN)
+
+        sent_messages = mock_client.chat.completions.create.call_args.kwargs["messages"]
+        sent_prompt = sent_messages[1]["content"]
+        assert "top-N question" in sent_prompt
+
+
+class TestIntentClassifier:
+    """Test intent classification and its fail-open fallback."""
+
+    @patch('nl2bi.core.intent_classifier.llm_client')
+    def test_classify_maps_valid_response(self, mock_llm_client):
+        mock_llm_client.get_json_completion.return_value = {"question_type": "topn"}
+
+        classifier = IntentClassifier(api_key="test")
+        assert classifier.classify("top 5 customers") == QuestionType.TOPN
+
+    @patch('nl2bi.core.intent_classifier.llm_client')
+    def test_classify_falls_back_to_filter_on_garbage_output(self, mock_llm_client):
+        mock_llm_client.get_json_completion.return_value = {"question_type": "not-a-real-type"}
+
+        classifier = IntentClassifier(api_key="test")
+        assert classifier.classify("anything") == QuestionType.FILTER
+
 
 class TestLLMClient:
     """Test the provider-agnostic LLM call used by SQLGenerator/ChartFinder."""
@@ -236,12 +275,14 @@ class TestOrchestratorGuardrail:
     """Test that the orchestrator enforces the read-only guardrail before executing."""
 
     @patch('nl2bi.orchestrator.pd')
+    @patch('nl2bi.orchestrator.IntentClassifier')
     @patch('nl2bi.orchestrator.ChartFinder')
     @patch('nl2bi.orchestrator.SQLGenerator')
     @patch('nl2bi.orchestrator.SchemaExtractor')
     @patch('nl2bi.orchestrator.create_engine')
     def test_destructive_sql_never_reaches_execution(
-        self, mock_create_engine, mock_schema_cls, mock_sql_gen_cls, mock_chart_cls, mock_pd
+        self, mock_create_engine, mock_schema_cls, mock_sql_gen_cls, mock_chart_cls,
+        mock_intent_cls, mock_pd
     ):
         """A DROP TABLE returned by the LLM should be rejected, never passed to pd.read_sql."""
         from nl2bi.orchestrator import NL2BIOrchestrator

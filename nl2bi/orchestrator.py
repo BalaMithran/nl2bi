@@ -10,6 +10,7 @@ from nl2bi.core import SchemaExtractor
 from nl2bi.core.sql_generator import SQLGenerator
 from nl2bi.core.chart_finder import ChartFinder, ChartRecommendation
 from nl2bi.core.validator import validate_readonly
+from nl2bi.core.intent_classifier import IntentClassifier
 
 
 class NL2BIOrchestrator:
@@ -47,6 +48,7 @@ class NL2BIOrchestrator:
         )
 
         self.chart_finder = ChartFinder(api_key=openai_api_key, provider=provider)
+        self.intent_classifier = IntentClassifier(api_key=openai_api_key, provider=provider)
     
     def query(
         self,
@@ -72,8 +74,17 @@ class NL2BIOrchestrator:
             "data": None,
             "columns": None,
             "chart_recommendations": [],
+            "question_type": None,
             "error": None,
         }
+
+        # Classify intent once; non-fatal if it fails, SQL generation just
+        # loses the per-type prompt hint
+        try:
+            question_type = self.intent_classifier.classify(natural_language_query)
+            result["question_type"] = question_type.value
+        except Exception:
+            question_type = None
 
         # Generate SQL, retrying with execution feedback if it fails to run
         sql, explanation = None, None
@@ -85,6 +96,7 @@ class NL2BIOrchestrator:
                     natural_language_query,
                     previous_sql=previous_sql,
                     error=previous_error,
+                    question_type=question_type,
                 )
             except Exception as e:
                 result["error"] = f"SQL generation failed: {str(e)}"

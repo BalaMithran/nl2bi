@@ -6,6 +6,20 @@ from typing import Optional, Tuple
 import os
 from nl2bi.core import SchemaExtractor
 from nl2bi.core import llm_client
+from nl2bi.core.intent_classifier import QuestionType
+
+_QUESTION_TYPE_HINTS = {
+    QuestionType.FILTER: "This is a filter question - likely needs a WHERE clause.",
+    QuestionType.KPI: "This is a KPI question - likely needs an aggregate (COUNT/SUM/AVG).",
+    QuestionType.GROUPING: "This is a grouping question - likely needs GROUP BY.",
+    QuestionType.TOPN: "This is a top-N question - likely needs ORDER BY ... LIMIT N.",
+    QuestionType.COMPARISON: "This is a comparison question - likely needs multiple aggregates or a self-join.",
+    QuestionType.CROSS_ENTITY: "This spans multiple entities - likely needs a JOIN across tables.",
+    QuestionType.RISK_ALERT: "This is a risk/alert question - likely needs a threshold-based WHERE clause.",
+    QuestionType.FINANCIAL: "This is a financial question - be precise with monetary aggregation and rounding.",
+    QuestionType.DRILLDOWN: "This is a drilldown question - likely needs a more granular GROUP BY than a prior query.",
+    QuestionType.RECOMMENDATION: "This is a recommendation question - likely needs ranking by a derived score.",
+}
 
 
 class SQLGenerator:
@@ -37,6 +51,7 @@ class SQLGenerator:
         query: str,
         previous_sql: Optional[str] = None,
         error: Optional[str] = None,
+        question_type: Optional[QuestionType] = None,
     ) -> Tuple[str, str]:
         """
         Generate SQL from a natural language query.
@@ -45,6 +60,7 @@ class SQLGenerator:
             query: Natural language query
             previous_sql: A prior SQL attempt that failed to execute, if any
             error: The execution error raised by `previous_sql`, if any
+            question_type: Classified question type, used to nudge the prompt
 
         Returns:
             Tuple of (sql_query, explanation)
@@ -70,6 +86,9 @@ Respond with ONLY a JSON object of the form:
 User Query: {query}
 
 Generate SQL for this query."""
+
+        if question_type is not None:
+            user_prompt += f"\n\n{_QUESTION_TYPE_HINTS[question_type]}"
 
         if previous_sql and error:
             user_prompt += f"""
