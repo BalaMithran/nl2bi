@@ -259,6 +259,55 @@ class TestUtils:
         assert truncate_text(short_text) == short_text
 
 
+class TestNL2BIFacade:
+    """Test the public NL2BI() facade over NL2BIOrchestrator."""
+
+    @patch('nl2bi.api.NL2BIOrchestrator')
+    def test_init_translates_kwargs_to_orchestrator(self, mock_orchestrator_cls):
+        from nl2bi.api import NL2BI
+
+        NL2BI(db_url="sqlite:///test.db", api_key="test-key", max_sql_retries=5)
+
+        mock_orchestrator_cls.assert_called_once_with(
+            connection_string="sqlite:///test.db",
+            openai_api_key="test-key",
+            max_sql_retries=5,
+        )
+
+    def test_init_rejects_unimplemented_provider(self):
+        from nl2bi.api import NL2BI
+
+        with pytest.raises(ValueError):
+            NL2BI(db_url="sqlite:///test.db", llm="anthropic")
+
+    @patch('nl2bi.api.NL2BIOrchestrator')
+    def test_query_returns_query_result_with_attribute_access(self, mock_orchestrator_cls):
+        from nl2bi.api import NL2BI
+
+        mock_orchestrator_cls.return_value.query.return_value = {
+            "query": "top customers",
+            "sql": "SELECT * FROM customers",
+            "sql_explanation": "lists customers",
+            "data": [{"id": 1, "name": "Acme"}],
+            "columns": ["id", "name"],
+            "chart_recommendations": [
+                {"type": "bar", "title": "Customers", "x_column": "name",
+                 "y_column": "id", "group_by": None, "reasoning": "comparison"},
+            ],
+            "error": None,
+        }
+
+        agent = NL2BI(db_url="sqlite:///test.db", api_key="test-key")
+        result = agent.query("top customers")
+
+        assert result.sql == "SELECT * FROM customers"
+        assert result.summary == "lists customers"
+        assert result.chart_type == "bar"
+        assert result.error is None
+        assert list(result.table.columns) == ["id", "name"]
+        assert len(result.table) == 1
+
+
 # Integration tests would go here
 class TestIntegration:
     """Integration tests (requires test database)."""
