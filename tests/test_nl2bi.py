@@ -50,6 +50,7 @@ class TestSchemaExtractor:
             for name in table_names
         }
         extractor._extracted = True
+        extractor.glossary = {}
         return extractor
 
     def test_get_relevant_schema_string_ranks_matching_tables_first(self):
@@ -68,6 +69,27 @@ class TestSchemaExtractor:
 
         assert "Table: customers" in result
         assert "Table: orders" in result
+
+    def test_business_term_appears_in_schema_string(self):
+        extractor = self._extractor_with_tables(["subscriptions"])
+        extractor.add_business_term(
+            "churn", "subscriptions.cancelled_at", "customers who stopped paying"
+        )
+
+        result = extractor.get_schema_string()
+
+        assert "churn -> subscriptions.cancelled_at" in result
+        assert "customers who stopped paying" in result
+
+    def test_business_term_boosts_retrieval_for_unrelated_wording(self):
+        extractor = self._extractor_with_tables(["subscriptions", "audit_logs", "invoices"])
+        extractor.add_business_term("churn", "subscriptions.cancelled_at")
+
+        result = extractor.get_relevant_schema_string("show me churn this month", top_k=1)
+
+        assert "Table: subscriptions" in result
+        assert "Table: audit_logs" not in result
+        assert "Table: invoices" not in result
 
 
 class TestSQLGenerator:

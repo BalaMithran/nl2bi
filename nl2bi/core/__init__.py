@@ -2,7 +2,7 @@
 Schema extraction from databases - discovers tables, columns, relationships.
 """
 
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 import re
 from sqlalchemy import inspect, create_engine
@@ -42,6 +42,7 @@ class SchemaExtractor:
         self.engine: Engine = create_engine(connection_string)
         self.schema: Dict[str, TableInfo] = {}
         self._extracted = False
+        self.glossary: Dict[str, Tuple[str, Optional[str]]] = {}
     
     def extract_schema(self) -> Dict[str, TableInfo]:
         """
@@ -116,6 +117,16 @@ class SchemaExtractor:
             )
         return "\n".join(lines)
 
+    def _glossary_string(self) -> str:
+        """Format the business-term glossary as LLM-readable text, if any terms exist."""
+        if not self.glossary:
+            return ""
+        lines = ["\nBusiness terms:"]
+        for term, (maps_to, description) in self.glossary.items():
+            desc_info = f" - {description}" if description else ""
+            lines.append(f"  - {term} -> {maps_to}{desc_info}")
+        return "\n".join(lines)
+
     def get_schema_string(self) -> str:
         """
         Get human-readable schema description for LLM context.
@@ -126,7 +137,8 @@ class SchemaExtractor:
         if not self._extracted:
             self.extract_schema()
 
-        return "\n".join(self._table_to_string(t) for t in self.schema.values())
+        tables = "\n".join(self._table_to_string(t) for t in self.schema.values())
+        return tables + self._glossary_string()
 
     def get_relevant_schema_string(self, query: str, top_k: int = 15) -> str:
         """
@@ -155,18 +167,40 @@ class SchemaExtractor:
         # appearing in a column named cancelled_at).
         query_tokens = set(re.findall(r"\w+", query.lower()))
 
+        # Business terms let a query match a table even with zero literal
+        # column-name overlap (e.g. "churn" -> subscriptions.cancelled_at).
+        boosted_tables = set()
+        for term, (maps_to, _description) in self.glossary.items():
+            if set(re.findall(r"\w+", term.lower())) & query_tokens:
+                boosted_tables.add(maps_to.split(".")[0])
+
         scored = []
         for table_info in self.schema.values():
             table_tokens = set(re.findall(r"\w+", table_info.name.lower()))
             for col in table_info.columns:
                 table_tokens |= set(re.findall(r"\w+", col.name.lower()))
             score = len(query_tokens & table_tokens)
+            if table_info.name in boosted_tables:
+                score += 1
             scored.append((score, table_info))
 
         scored.sort(key=lambda pair: pair[0], reverse=True)
         top_tables = [table for _, table in scored[:top_k]]
-        return "\n".join(self._table_to_string(t) for t in top_tables)
+        return "\n".join(self._table_to_string(t) for t in top_tables) + self._glossary_string()
     
+    def add_business_term(
+        self, term: str, maps_to: str, description: Optional[str] = None
+    ) -> None:
+        """
+        Map a business term to a schema element, e.g. "churn" -> "subscriptions.cancelled_at".
+
+        Args:
+            term: Business term as users would phrase it
+            maps_to: "table" or "table.column" the term maps to
+            description: Optional extra context for the LLM
+        """
+        self.glossary[term] = (maps_to, description)
+
     def add_table_description(self, table_name: str, description: str) -> None:
         """Add human-readable description to a table."""
         if table_name in self.schema:
