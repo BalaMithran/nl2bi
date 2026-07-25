@@ -12,8 +12,8 @@ setup(
         "openai>=1.0.0",
         "sqlalchemy>=2.0.0",
         "pandas>=1.5.0",
-        "langchain>=0.1.0",
         "python-dotenv>=1.0.0",
+        "sqlglot>=23.0.0",
     ],
     extras_require={
         "dev": [
@@ -24,11 +24,6 @@ setup(
         ],
         "llm": [
             "anthropic>=0.7.0",
-        ],
-    },
-    entry_points={
-        "console_scripts": [
-            "nl2bi=nl2bi.cli:main",
         ],
     },
 )

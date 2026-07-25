@@ -9,6 +9,7 @@ from sqlalchemy import create_engine
 from nl2bi.core import SchemaExtractor
 from nl2bi.core.sql_generator import SQLGenerator
 from nl2bi.core.chart_finder import ChartFinder, ChartRecommendation
+from nl2bi.core.validator import validate_readonly
 
 
 class NL2BIOrchestrator:
@@ -85,6 +86,17 @@ class NL2BIOrchestrator:
             except Exception as e:
                 result["error"] = f"SQL generation failed: {str(e)}"
                 return result
+
+            is_readonly, reason = validate_readonly(sql)
+            if not is_readonly:
+                previous_sql, previous_error = sql, (
+                    f"SQL rejected: {reason}. Only a single read-only SELECT/WITH "
+                    "query is permitted."
+                )
+                if attempt == self.max_sql_retries:
+                    result["error"] = f"SQL rejected after {attempt + 1} attempt(s): {reason}"
+                    return result
+                continue
 
             if not execute:
                 break

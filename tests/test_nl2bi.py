@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch, MagicMock
 from nl2bi.core import SchemaExtractor, ColumnInfo, TableInfo
 from nl2bi.core.sql_generator import SQLGenerator
 from nl2bi.core.chart_finder import ChartFinder, ChartType
+from nl2bi.core.validator import validate_readonly
 
 
 class TestSchemaExtractor:
@@ -96,6 +97,70 @@ class TestSQLGenerator:
         sent_prompt = sent_messages[1]["content"]
         assert "SELECT * FROM userz" in sent_prompt
         assert "does not exist" in sent_prompt
+
+
+class TestSQLValidator:
+    """Test the read-only SQL guardrail."""
+
+    @pytest.mark.parametrize("sql", [
+        "SELECT * FROM users",
+        "SELECT id, name FROM users WHERE id = 1",
+        "WITH recent AS (SELECT * FROM orders) SELECT * FROM recent",
+        "SELECT * FROM t WHERE x IN (SELECT id FROM other)",
+    ])
+    def test_valid_readonly_queries_pass(self, sql):
+        is_valid, reason = validate_readonly(sql)
+        assert is_valid is True
+        assert reason is None
+
+    @pytest.mark.parametrize("sql", [
+        "SELECT * FROM users; DROP TABLE users;",
+        "INSERT INTO users VALUES (1, 'x')",
+        "UPDATE users SET name = 'x'",
+        "DELETE FROM users",
+        "DROP TABLE users",
+        "not valid sql at all ((",
+    ])
+    def test_destructive_or_invalid_queries_are_rejected(self, sql):
+        is_valid, reason = validate_readonly(sql)
+        assert is_valid is False
+        assert reason is not None
+
+    def test_dml_hidden_in_cte_is_rejected(self):
+        """DML inside a CTE (e.g. Postgres's DELETE ... RETURNING) must not slip through."""
+        is_valid, reason = validate_readonly(
+            "WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x"
+        )
+        assert is_valid is False
+        assert reason is not None
+
+
+class TestOrchestratorGuardrail:
+    """Test that the orchestrator enforces the read-only guardrail before executing."""
+
+    @patch('nl2bi.orchestrator.pd')
+    @patch('nl2bi.orchestrator.ChartFinder')
+    @patch('nl2bi.orchestrator.SQLGenerator')
+    @patch('nl2bi.orchestrator.SchemaExtractor')
+    @patch('nl2bi.orchestrator.create_engine')
+    def test_destructive_sql_never_reaches_execution(
+        self, mock_create_engine, mock_schema_cls, mock_sql_gen_cls, mock_chart_cls, mock_pd
+    ):
+        """A DROP TABLE returned by the LLM should be rejected, never passed to pd.read_sql."""
+        from nl2bi.orchestrator import NL2BIOrchestrator
+
+        mock_sql_gen_cls.return_value.generate_sql.return_value = (
+            "DROP TABLE users", "deletes the users table"
+        )
+
+        orchestrator = NL2BIOrchestrator(
+            "sqlite:///test.db", openai_api_key="test", max_sql_retries=0
+        )
+        result = orchestrator.query("delete all the users")
+
+        mock_pd.read_sql.assert_not_called()
+        assert result["error"] is not None
+        assert "rejected" in result["error"].lower()
 
 
 class TestChartFinder:
