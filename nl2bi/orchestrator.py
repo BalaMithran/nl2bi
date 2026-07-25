@@ -77,6 +77,9 @@ class NL2BIOrchestrator:
             "columns": None,
             "chart_recommendations": [],
             "question_type": None,
+            "retry_count": 0,
+            "validation_passed": None,
+            "execution_success": None,
             "error": None,
         }
 
@@ -93,6 +96,7 @@ class NL2BIOrchestrator:
         previous_sql, previous_error = None, None
 
         for attempt in range(self.max_sql_retries + 1):
+            result["retry_count"] = attempt
             try:
                 sql, explanation = self.sql_generator.generate_sql(
                     natural_language_query,
@@ -107,6 +111,7 @@ class NL2BIOrchestrator:
 
             is_readonly, reason = validate_readonly(sql)
             if not is_readonly:
+                result["validation_passed"] = False
                 previous_sql, previous_error = sql, (
                     f"SQL rejected: {reason}. Only a single read-only SELECT/WITH "
                     "query is permitted."
@@ -115,14 +120,17 @@ class NL2BIOrchestrator:
                     result["error"] = f"SQL rejected after {attempt + 1} attempt(s): {reason}"
                     return result
                 continue
+            result["validation_passed"] = True
 
             if not execute:
                 break
 
             try:
                 df = pd.read_sql(sql, self.engine)
+                result["execution_success"] = True
                 break
             except Exception as e:
+                result["execution_success"] = False
                 previous_sql, previous_error = sql, str(e)
                 if attempt == self.max_sql_retries:
                     result["error"] = (

@@ -2,6 +2,7 @@
 Unit tests for NL2BI package.
 """
 
+import logging
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 from nl2bi.core import SchemaExtractor, ColumnInfo, TableInfo
@@ -547,6 +548,55 @@ class TestNL2BIFacadeMemory:
         assert "past question" in call_kwargs["history_context"]
         assert "SELECT past" in call_kwargs["history_context"]
         mock_store.add.assert_called_once_with("new question", {"sql": "SELECT 1"})
+
+
+class TestQueryMetrics:
+    """Test QueryResult.metrics and the structured log line emitted per query."""
+
+    @patch('nl2bi.api.NL2BIOrchestrator')
+    def test_metrics_populated_from_orchestrator_result(self, mock_orchestrator_cls):
+        from nl2bi.api import NL2BI
+
+        mock_orchestrator_cls.return_value.query.return_value = {
+            "query": "q", "sql": "SELECT 1", "sql_explanation": "x",
+            "data": [{"a": 1}], "columns": ["a"],
+            "chart_recommendations": [
+                {"type": "bar", "title": "t", "x_column": None,
+                 "y_column": None, "group_by": None, "reasoning": ""},
+            ],
+            "question_type": "kpi", "retry_count": 1,
+            "validation_passed": True, "execution_success": True,
+            "error": None,
+        }
+
+        agent = NL2BI(db_url="sqlite:///test.db", api_key="test-key")
+        result = agent.query("how many users")
+
+        assert result.metrics.question_type == "kpi"
+        assert result.metrics.sql_retry_count == 1
+        assert result.metrics.validation_passed is True
+        assert result.metrics.execution_success is True
+        assert result.metrics.chart_recommendation_count == 1
+        assert result.metrics.latency_seconds > 0
+
+    @patch('nl2bi.api.NL2BIOrchestrator')
+    def test_query_emits_structured_log_line(self, mock_orchestrator_cls, caplog):
+        from nl2bi.api import NL2BI
+
+        mock_orchestrator_cls.return_value.query.return_value = {
+            "query": "q", "sql": "SELECT 1", "sql_explanation": "x",
+            "data": None, "columns": None, "chart_recommendations": [],
+            "question_type": "filter", "retry_count": 0,
+            "validation_passed": True, "execution_success": None,
+            "error": None,
+        }
+
+        agent = NL2BI(db_url="sqlite:///test.db", api_key="test-key")
+        with caplog.at_level(logging.INFO, logger="nl2bi"):
+            agent.query("q")
+
+        assert "question_type=filter" in caplog.text
+        assert "retry_count=0" in caplog.text
 
 
 # Integration tests would go here

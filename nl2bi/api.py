@@ -5,6 +5,8 @@ Public-facing NL2BI API - a thin facade over NL2BIOrchestrator.
 from typing import Any, Dict, List, NamedTuple, Optional
 from dataclasses import dataclass, field
 from collections import deque
+import logging
+import time
 import pandas as pd
 
 from nl2bi.orchestrator import NL2BIOrchestrator
@@ -12,12 +14,24 @@ from nl2bi.core.vector_store import SimpleVectorStore
 
 _SUPPORTED_PROVIDERS = ("openai", "anthropic", "local")
 _HISTORY_SIZE = 5
+_logger = logging.getLogger("nl2bi")
 
 
 class Turn(NamedTuple):
     """One prior question/SQL pair in a conversation."""
     query: str
     sql: str
+
+
+@dataclass
+class QueryMetrics:
+    """Observability data for a single query - not a substitute for a real eval harness."""
+    question_type: Optional[str]
+    sql_retry_count: int
+    validation_passed: Optional[bool]
+    execution_success: Optional[bool]
+    latency_seconds: float
+    chart_recommendation_count: int
 
 
 @dataclass
@@ -30,15 +44,27 @@ class QueryResult:
     chart_type: Optional[str]
     chart_recommendations: List[Dict[str, Any]] = field(default_factory=list)
     error: Optional[str] = None
+    metrics: Optional[QueryMetrics] = None
 
     @classmethod
-    def from_orchestrator_result(cls, result: Dict[str, Any]) -> "QueryResult":
+    def from_orchestrator_result(
+        cls, result: Dict[str, Any], latency_seconds: float = 0.0
+    ) -> "QueryResult":
         data = result.get("data")
         columns = result.get("columns")
         table = pd.DataFrame.from_records(data, columns=columns) if data is not None else None
 
         chart_recommendations = result.get("chart_recommendations") or []
         chart_type = chart_recommendations[0]["type"] if chart_recommendations else None
+
+        metrics = QueryMetrics(
+            question_type=result.get("question_type"),
+            sql_retry_count=result.get("retry_count", 0),
+            validation_passed=result.get("validation_passed"),
+            execution_success=result.get("execution_success"),
+            latency_seconds=latency_seconds,
+            chart_recommendation_count=len(chart_recommendations),
+        )
 
         return cls(
             query=result.get("query"),
@@ -48,6 +74,7 @@ class QueryResult:
             chart_type=chart_type,
             chart_recommendations=chart_recommendations,
             error=result.get("error"),
+            metrics=metrics,
         )
 
 
@@ -113,18 +140,40 @@ class NL2BI:
         """
         history_context = self._build_history_context(natural_language_query)
 
+        start = time.perf_counter()
         result = self._orchestrator.query(
             natural_language_query,
             execute=execute,
             recommend_charts=recommend_charts,
             history_context=history_context,
         )
-        query_result = QueryResult.from_orchestrator_result(result)
+        latency_seconds = time.perf_counter() - start
+
+        query_result = QueryResult.from_orchestrator_result(result, latency_seconds=latency_seconds)
+        self._log_metrics(query_result)
 
         if query_result.sql:
             self._remember(natural_language_query, query_result.sql)
 
         return query_result
+
+    def _log_metrics(self, query_result: QueryResult) -> None:
+        """
+        Emit a structured log line for this query.
+
+        This is the honest minimum for "observability" - retry counts,
+        pass/fail flags, and latency. It is not a golden-dataset eval
+        harness (no ground truth exists yet to score SQL correctness or
+        hallucination rate against) - that's future work once real usage
+        produces a seed set of (question, expected_result) pairs.
+        """
+        m = query_result.metrics
+        _logger.info(
+            "question_type=%s retry_count=%d validation_passed=%s execution_success=%s "
+            "latency_seconds=%.3f chart_recommendation_count=%d error=%s",
+            m.question_type, m.sql_retry_count, m.validation_passed, m.execution_success,
+            m.latency_seconds, m.chart_recommendation_count, query_result.error,
+        )
 
     def _build_history_context(self, query: str) -> Optional[str]:
         """Build a text block summarizing short-term and (if enabled) long-term memory."""
