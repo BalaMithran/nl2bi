@@ -5,9 +5,8 @@ Chart type recommendations based on data characteristics and query intent.
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from enum import Enum
-import json
 import os
-from openai import OpenAI
+from nl2bi.core import llm_client
 
 
 class ChartType(str, Enum):
@@ -37,17 +36,23 @@ class ChartRecommendation:
 class ChartFinder:
     """Find appropriate chart types for queries and data."""
 
-    def __init__(self, api_key: Optional[str] = None, model: str = "gpt-4o-mini"):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+        provider: str = "openai",
+    ):
         """
         Initialize chart finder.
 
         Args:
-            api_key: OpenAI API key
-            model: LLM model to use
+            api_key: API key for the chosen provider
+            model: LLM model to use (defaults to a sensible model for the provider)
+            provider: LLM provider - "openai", "anthropic", or "local" (Ollama)
         """
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        self.model = model
-        self.client = OpenAI(api_key=self.api_key)
+        self.provider = provider
+        self.model = model or llm_client.default_model_for(provider)
 
     def recommend_charts(
         self,
@@ -93,17 +98,9 @@ Available columns: {', '.join(columns)}
 
 Recommend the best 2-3 chart types for visualizing this query result."""
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            max_tokens=1024,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+        payload = llm_client.get_json_completion(
+            self.provider, self.api_key, self.model, system_prompt, user_prompt
         )
-
-        payload = json.loads(response.choices[0].message.content)
         return [
             self._parse_recommendation(rec)
             for rec in payload.get("recommendations", [])

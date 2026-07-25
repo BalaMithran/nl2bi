@@ -47,15 +47,15 @@ class TestSQLGenerator:
     """Test SQL generation functionality."""
     
     @patch('nl2bi.core.sql_generator.SchemaExtractor')
-    @patch('nl2bi.core.sql_generator.OpenAI')
-    def test_initialization(self, mock_openai, mock_schema):
+    def test_initialization(self, mock_schema):
         """Test SQLGenerator initialization."""
         generator = SQLGenerator(mock_schema, api_key="test-key")
         assert generator.schema_extractor == mock_schema
         assert generator.api_key == "test-key"
+        assert generator.provider == "openai"
         assert generator.model == "gpt-4o-mini"
-    
-    @patch('nl2bi.core.sql_generator.OpenAI')
+
+    @patch('nl2bi.core.llm_client.OpenAI')
     def test_generate_sql_parses_json_response(self, mock_openai_cls):
         """generate_sql should parse the JSON-mode response into (sql, explanation)."""
         mock_client = MagicMock()
@@ -73,7 +73,7 @@ class TestSQLGenerator:
         assert sql == "SELECT * FROM users"
         assert explanation == "lists users"
 
-    @patch('nl2bi.core.sql_generator.OpenAI')
+    @patch('nl2bi.core.llm_client.OpenAI')
     def test_generate_sql_includes_previous_error_in_retry_prompt(self, mock_openai_cls):
         """A retry attempt should surface the prior SQL and error to the LLM."""
         mock_client = MagicMock()
@@ -97,6 +97,54 @@ class TestSQLGenerator:
         sent_prompt = sent_messages[1]["content"]
         assert "SELECT * FROM userz" in sent_prompt
         assert "does not exist" in sent_prompt
+
+
+class TestLLMClient:
+    """Test the provider-agnostic LLM call used by SQLGenerator/ChartFinder."""
+
+    @patch('nl2bi.core.llm_client.OpenAI')
+    def test_openai_provider_parses_json(self, mock_openai_cls):
+        from nl2bi.core import llm_client
+
+        mock_openai_cls.return_value.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content='{"ok": true}'))]
+        )
+
+        result = llm_client.get_json_completion("openai", "key", "gpt-4o-mini", "sys", "usr")
+        assert result == {"ok": True}
+        mock_openai_cls.assert_called_once_with(api_key="key")
+
+    def test_anthropic_provider_parses_json(self):
+        pytest.importorskip("anthropic", reason="anthropic is an optional extra (pip install nl2bi[llm])")
+        from nl2bi.core import llm_client
+
+        with patch('anthropic.Anthropic') as mock_anthropic_cls:
+            mock_anthropic_cls.return_value.messages.create.return_value = MagicMock(
+                content=[MagicMock(text='{"ok": true}')]
+            )
+            result = llm_client.get_json_completion(
+                "anthropic", "key", "claude-3-5-haiku-latest", "sys", "usr"
+            )
+        assert result == {"ok": True}
+
+    @patch('nl2bi.core.llm_client.OpenAI')
+    def test_local_provider_uses_ollama_base_url(self, mock_openai_cls):
+        from nl2bi.core import llm_client
+
+        mock_openai_cls.return_value.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content='{"ok": true}'))]
+        )
+
+        result = llm_client.get_json_completion("local", None, "llama3.1", "sys", "usr")
+        assert result == {"ok": True}
+        mock_openai_cls.assert_called_once_with(api_key="ollama", base_url="http://localhost:11434/v1")
+
+    def test_default_model_for_provider(self):
+        from nl2bi.core import llm_client
+
+        assert llm_client.default_model_for("openai") == "gpt-4o-mini"
+        assert llm_client.default_model_for("anthropic") == "claude-3-5-haiku-latest"
+        assert llm_client.default_model_for("local") == "llama3.1"
 
 
 class TestSQLValidator:
@@ -166,11 +214,11 @@ class TestOrchestratorGuardrail:
 class TestChartFinder:
     """Test chart recommendation functionality."""
     
-    @patch('nl2bi.core.chart_finder.OpenAI')
-    def test_initialization(self, mock_openai):
+    def test_initialization(self):
         """Test ChartFinder initialization."""
         finder = ChartFinder(api_key="test-key")
         assert finder.api_key == "test-key"
+        assert finder.provider == "openai"
         assert finder.model == "gpt-4o-mini"
     
     def test_chart_type_enum(self):
@@ -271,14 +319,27 @@ class TestNL2BIFacade:
         mock_orchestrator_cls.assert_called_once_with(
             connection_string="sqlite:///test.db",
             openai_api_key="test-key",
+            provider="openai",
             max_sql_retries=5,
         )
 
-    def test_init_rejects_unimplemented_provider(self):
+    @patch('nl2bi.api.NL2BIOrchestrator')
+    def test_init_passes_provider_through(self, mock_orchestrator_cls):
+        from nl2bi.api import NL2BI
+
+        NL2BI(db_url="sqlite:///test.db", llm="anthropic", api_key="test-key")
+
+        mock_orchestrator_cls.assert_called_once_with(
+            connection_string="sqlite:///test.db",
+            openai_api_key="test-key",
+            provider="anthropic",
+        )
+
+    def test_init_rejects_unsupported_provider(self):
         from nl2bi.api import NL2BI
 
         with pytest.raises(ValueError):
-            NL2BI(db_url="sqlite:///test.db", llm="anthropic")
+            NL2BI(db_url="sqlite:///test.db", llm="cohere")
 
     @patch('nl2bi.api.NL2BIOrchestrator')
     def test_query_returns_query_result_with_attribute_access(self, mock_orchestrator_cls):

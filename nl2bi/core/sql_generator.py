@@ -3,10 +3,9 @@ SQL generation from natural language queries using LLMs.
 """
 
 from typing import Optional, Tuple
-import json
 import os
-from openai import OpenAI
 from nl2bi.core import SchemaExtractor
+from nl2bi.core import llm_client
 
 
 class SQLGenerator:
@@ -16,20 +15,22 @@ class SQLGenerator:
         self,
         schema_extractor: SchemaExtractor,
         api_key: Optional[str] = None,
-        model: str = "gpt-4o-mini",
+        model: Optional[str] = None,
+        provider: str = "openai",
     ):
         """
         Initialize SQL generator.
 
         Args:
             schema_extractor: SchemaExtractor instance with database schema
-            api_key: OpenAI API key (defaults to OPENAI_API_KEY env var)
-            model: LLM model to use
+            api_key: API key for the chosen provider (defaults to OPENAI_API_KEY env var)
+            model: LLM model to use (defaults to a sensible model for the provider)
+            provider: LLM provider - "openai", "anthropic", or "local" (Ollama)
         """
         self.schema_extractor = schema_extractor
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        self.model = model
-        self.client = OpenAI(api_key=self.api_key)
+        self.provider = provider
+        self.model = model or llm_client.default_model_for(provider)
 
     def generate_sql(
         self,
@@ -79,15 +80,7 @@ Error: {error}
 
 Fix the query so it executes successfully against the schema above."""
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            max_tokens=1024,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+        payload = llm_client.get_json_completion(
+            self.provider, self.api_key, self.model, system_prompt, user_prompt
         )
-
-        payload = json.loads(response.choices[0].message.content)
         return payload.get("sql", ""), payload.get("explanation", "")

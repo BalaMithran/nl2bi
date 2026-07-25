@@ -63,13 +63,12 @@ class NL2BI:
         """
         if llm not in _SUPPORTED_PROVIDERS:
             raise ValueError(f"Unsupported llm provider: {llm!r}. Choose from {_SUPPORTED_PROVIDERS}")
-        if llm != "openai":
-            raise ValueError(f"llm={llm!r} is not implemented yet - only 'openai' is currently supported")
 
         self.llm = llm
         self._orchestrator = NL2BIOrchestrator(
             connection_string=db_url,
             openai_api_key=api_key,
+            provider=llm,
             **kwargs,
         )
 

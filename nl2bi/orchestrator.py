@@ -20,15 +20,17 @@ class NL2BIOrchestrator:
         connection_string: str,
         openai_api_key: Optional[str] = None,
         max_sql_retries: int = 2,
+        provider: str = "openai",
     ):
         """
         Initialize orchestrator.
 
         Args:
             connection_string: SQLAlchemy connection string
-            openai_api_key: OpenAI API key
+            openai_api_key: API key for the chosen provider
             max_sql_retries: Number of times to ask the LLM to fix SQL that
                 fails to execute, feeding back the execution error each time
+            provider: LLM provider - "openai", "anthropic", or "local" (Ollama)
         """
         self.connection_string = connection_string
         self.engine = create_engine(connection_string)
@@ -41,9 +43,10 @@ class NL2BIOrchestrator:
         self.sql_generator = SQLGenerator(
             self.schema_extractor,
             api_key=openai_api_key,
+            provider=provider,
         )
 
-        self.chart_finder = ChartFinder(api_key=openai_api_key)
+        self.chart_finder = ChartFinder(api_key=openai_api_key, provider=provider)
     
     def query(
         self,
