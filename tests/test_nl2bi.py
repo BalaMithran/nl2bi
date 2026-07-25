@@ -4,15 +4,15 @@ Unit tests for NL2BI package.
 
 import pytest
 from unittest.mock import Mock, patch, MagicMock
-from nl2bi.core.schema import SchemaExtractor, ColumnInfo, TableInfo
+from nl2bi.core import SchemaExtractor, ColumnInfo, TableInfo
 from nl2bi.core.sql_generator import SQLGenerator
 from nl2bi.core.chart_finder import ChartFinder, ChartType
 
 
 class TestSchemaExtractor:
     """Test schema extraction functionality."""
-    
-    @patch('nl2bi.core.schema.create_engine')
+
+    @patch('nl2bi.core.create_engine')
     def test_initialization(self, mock_engine):
         """Test SchemaExtractor initialization."""
         extractor = SchemaExtractor("sqlite:///test.db")
@@ -54,22 +54,48 @@ class TestSQLGenerator:
         assert generator.api_key == "test-key"
         assert generator.model == "gpt-4o-mini"
     
-    @patch('nl2bi.core.sql_generator.text')
-    def test_validate_sql_valid(self, mock_text):
-        """Test validation of valid SQL."""
+    @patch('nl2bi.core.sql_generator.OpenAI')
+    def test_generate_sql_parses_json_response(self, mock_openai_cls):
+        """generate_sql should parse the JSON-mode response into (sql, explanation)."""
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(
+                content='{"sql": "SELECT * FROM users", "explanation": "lists users"}'
+            ))]
+        )
+
         generator = SQLGenerator(Mock(), api_key="test")
-        is_valid, error = generator.validate_sql("SELECT * FROM users")
-        assert is_valid is True
-        assert error is None
-    
-    @patch('nl2bi.core.sql_generator.text')
-    def test_validate_sql_invalid(self, mock_text):
-        """Test validation of invalid SQL."""
-        mock_text.side_effect = Exception("Syntax error")
+        generator.schema_extractor.get_schema_string.return_value = "Table: users"
+
+        sql, explanation = generator.generate_sql("show me users")
+        assert sql == "SELECT * FROM users"
+        assert explanation == "lists users"
+
+    @patch('nl2bi.core.sql_generator.OpenAI')
+    def test_generate_sql_includes_previous_error_in_retry_prompt(self, mock_openai_cls):
+        """A retry attempt should surface the prior SQL and error to the LLM."""
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(
+                content='{"sql": "SELECT id FROM users", "explanation": "fixed"}'
+            ))]
+        )
+
         generator = SQLGenerator(Mock(), api_key="test")
-        is_valid, error = generator.validate_sql("INVALID SQL HERE")
-        assert is_valid is False
-        assert error is not None
+        generator.schema_extractor.get_schema_string.return_value = "Table: users"
+
+        generator.generate_sql(
+            "show me users",
+            previous_sql="SELECT * FROM userz",
+            error='relation "userz" does not exist',
+        )
+
+        sent_messages = mock_client.chat.completions.create.call_args.kwargs["messages"]
+        sent_prompt = sent_messages[1]["content"]
+        assert "SELECT * FROM userz" in sent_prompt
+        assert "does not exist" in sent_prompt
 
 
 class TestChartFinder:
@@ -88,21 +114,28 @@ class TestChartFinder:
         assert ChartType.LINE.value == "line"
         assert ChartType.PIE.value == "pie"
     
-    def test_parse_recommendation_block(self):
-        """Test parsing recommendation block."""
+    def test_parse_recommendation(self):
+        """Test parsing a single JSON recommendation."""
         finder = ChartFinder(api_key="test")
-        
-        block = """CHART_TYPE: line
-TITLE: Sales Over Time
-X_COLUMN: date
-Y_COLUMN: revenue
-REASONING: Shows trends over time"""
-        
-        rec = finder._parse_recommendation_block(block, ["date", "revenue"])
+
+        rec = finder._parse_recommendation({
+            "chart_type": "line",
+            "title": "Sales Over Time",
+            "x_column": "date",
+            "y_column": "revenue",
+            "reasoning": "Shows trends over time",
+        })
         assert rec.chart_type == ChartType.LINE
         assert rec.title == "Sales Over Time"
         assert rec.x_column == "date"
         assert rec.y_column == "revenue"
+
+    def test_parse_recommendation_unknown_chart_type_falls_back_to_table(self):
+        """Test unrecognized chart_type values fall back to TABLE."""
+        finder = ChartFinder(api_key="test")
+
+        rec = finder._parse_recommendation({"chart_type": "not-a-real-type", "title": "X"})
+        assert rec.chart_type == ChartType.TABLE
 
 
 class TestChartRecommendation:

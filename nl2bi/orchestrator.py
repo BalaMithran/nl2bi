@@ -4,7 +4,7 @@ Main orchestrator that coordinates SQL generation, execution, and visualization.
 
 from typing import Dict, List, Any, Optional, Tuple
 import pandas as pd
-from sqlalchemy import text, create_engine
+from sqlalchemy import create_engine
 
 from nl2bi.core import SchemaExtractor
 from nl2bi.core.sql_generator import SQLGenerator
@@ -13,27 +13,35 @@ from nl2bi.core.chart_finder import ChartFinder, ChartRecommendation
 
 class NL2BIOrchestrator:
     """Main orchestrator for NL to BI conversion."""
-    
-    def __init__(self, connection_string: str, openai_api_key: Optional[str] = None):
+
+    def __init__(
+        self,
+        connection_string: str,
+        openai_api_key: Optional[str] = None,
+        max_sql_retries: int = 2,
+    ):
         """
         Initialize orchestrator.
-        
+
         Args:
             connection_string: SQLAlchemy connection string
             openai_api_key: OpenAI API key
+            max_sql_retries: Number of times to ask the LLM to fix SQL that
+                fails to execute, feeding back the execution error each time
         """
         self.connection_string = connection_string
         self.engine = create_engine(connection_string)
-        
+        self.max_sql_retries = max_sql_retries
+
         # Initialize components
         self.schema_extractor = SchemaExtractor(connection_string)
         self.schema_extractor.extract_schema()
-        
+
         self.sql_generator = SQLGenerator(
             self.schema_extractor,
             api_key=openai_api_key,
         )
-        
+
         self.chart_finder = ChartFinder(api_key=openai_api_key)
     
     def query(
@@ -62,34 +70,43 @@ class NL2BIOrchestrator:
             "chart_recommendations": [],
             "error": None,
         }
-        
-        # Generate SQL
-        try:
-            sql, explanation = self.sql_generator.generate_sql(
-                natural_language_query
-            )
-            result["sql"] = sql
-            result["sql_explanation"] = explanation
-        except Exception as e:
-            result["error"] = f"SQL generation failed: {str(e)}"
-            return result
-        
-        # Validate SQL
-        is_valid, error = self.sql_generator.validate_sql(sql)
-        if not is_valid:
-            result["error"] = f"SQL validation failed: {error}"
-            return result
-        
-        # Execute query if requested
-        if execute:
+
+        # Generate SQL, retrying with execution feedback if it fails to run
+        sql, explanation = None, None
+        previous_sql, previous_error = None, None
+
+        for attempt in range(self.max_sql_retries + 1):
+            try:
+                sql, explanation = self.sql_generator.generate_sql(
+                    natural_language_query,
+                    previous_sql=previous_sql,
+                    error=previous_error,
+                )
+            except Exception as e:
+                result["error"] = f"SQL generation failed: {str(e)}"
+                return result
+
+            if not execute:
+                break
+
             try:
                 df = pd.read_sql(sql, self.engine)
-                result["data"] = df.to_dict(orient="records")
-                result["columns"] = df.columns.tolist()
+                break
             except Exception as e:
-                result["error"] = f"Query execution failed: {str(e)}"
-                return result
-        
+                previous_sql, previous_error = sql, str(e)
+                if attempt == self.max_sql_retries:
+                    result["error"] = (
+                        f"Query execution failed after {attempt + 1} attempt(s): {str(e)}"
+                    )
+                    return result
+
+        result["sql"] = sql
+        result["sql_explanation"] = explanation
+
+        if execute:
+            result["data"] = df.to_dict(orient="records")
+            result["columns"] = df.columns.tolist()
+
         # Recommend charts if we have data
         if recommend_charts and result["data"] and result["columns"]:
             try:
